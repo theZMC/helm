@@ -27,3 +27,11 @@ type PostRenderer interface {
 	// error if there was an issue or failure while running the post render step
 	Run(renderedManifests *bytes.Buffer) (modifiedManifests *bytes.Buffer, err error)
 }
+
+// The PostRendererFunc type is an adapter to allow the use of ordinary functions as [PostRenderer]s.
+// If f is a function with the appropriate signature, PostRendererFunc(f) is a [PostRenderer] that calls f.
+type PostRendererFunc func(*bytes.Buffer) (*bytes.Buffer, error)
+
+func (f PostRendererFunc) Run(renderedManifests *bytes.Buffer) (modifiedManifests *bytes.Buffer, err error) {
+	return f(renderedManifests)
+}

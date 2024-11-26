@@ -223,13 +223,60 @@ func (cfg *Configuration) renderResources(ch *chart.Chart, values chartutil.Valu
 	}
 
 	if pr != nil {
-		b, err = pr.Run(b)
+		hs, b, err = runPostRenderer(hs, b, pr)
 		if err != nil {
-			return hs, b, notes, errors.Wrap(err, "error while running post render on files")
+			return hs, b, "", err
 		}
 	}
 
 	return hs, b, notes, nil
+}
+
+// runPostRenderer runs the post-renderer on the manifests buffer and updates
+// the hooks with their respective post-rendered manifests.
+//
+// TODO: in the future, a breaking change to `releaseutil.SortManifests` wherein it receives and applies the post-renderer
+// would likely be a better approach. We're applying post-renderers to hooks this way to prevent breaking `releasutil`'s
+// public API.
+func runPostRenderer(hs []*release.Hook, b *bytes.Buffer, pr postrender.PostRenderer) ([]*release.Hook, *bytes.Buffer, error) {
+	b, err := pr.Run(b)
+	if err != nil {
+		return hs, b, errors.Wrap(err, "error while running post render on files")
+	}
+
+	if len(hs) == 0 { // no hooks to post-render so we return early
+		return hs, b, nil
+	}
+
+	hb := bytes.NewBuffer(nil)
+	for _, h := range hs {
+		if hb.Len() == 0 {
+			fmt.Fprintf(hb, "%s", h.Manifest)
+		} else {
+			fmt.Fprintf(hb, "\n---\n%s", h.Manifest)
+		}
+	}
+
+	hb, err = pr.Run(hb)
+	if err != nil {
+		return hs, hb, errors.Wrap(err, "error while running post render on hooks")
+	}
+
+	if hb.Len() == 0 {
+		// Gotta have this case since bytes.Split always returns at least one element.
+		return hs, b, errors.New("post-renderer returned an empty buffer")
+	}
+
+	hms := bytes.Split(hb.Bytes(), []byte("\n---\n"))
+	if len(hms) != len(hs) {
+		return nil, nil, errors.New("post-renderer returned a different number of hooks than it received")
+	}
+
+	for i, m := range hms {
+		hs[i].Manifest = string(m)
+	}
+
+	return hs, b, nil
 }
 
 // RESTClientGetter gets the rest client

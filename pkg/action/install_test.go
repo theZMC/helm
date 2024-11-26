@@ -17,6 +17,7 @@ limitations under the License.
 package action
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -35,6 +36,7 @@ import (
 	"helm.sh/helm/v3/pkg/chart"
 	"helm.sh/helm/v3/pkg/chartutil"
 	kubefake "helm.sh/helm/v3/pkg/kube/fake"
+	"helm.sh/helm/v3/pkg/postrender"
 	"helm.sh/helm/v3/pkg/release"
 	"helm.sh/helm/v3/pkg/storage/driver"
 	helmtime "helm.sh/helm/v3/pkg/time"
@@ -457,6 +459,83 @@ func TestInstallRelease_WaitForJobs(t *testing.T) {
 	is.Error(err)
 	is.Contains(res.Info.Description, "I timed out")
 	is.Equal(res.Info.Status, release.StatusFailed)
+}
+
+func TestInstallRelease_WithNoOpPostRenderer(t *testing.T) {
+	is := assert.New(t)
+	instAction := installAction(t)
+
+	noop := func(b *bytes.Buffer) (*bytes.Buffer, error) {
+		return b, nil
+	}
+
+	instAction.PostRenderer = postrender.PostRendererFunc(noop)
+
+	vals := map[string]interface{}{}
+	ctx, done := context.WithCancel(context.Background())
+	defer done()
+	res, err := instAction.RunWithContext(ctx, buildChart(), vals)
+	is.NoError(err)
+	is.Equal(res.Name, "test-install-release", "Expected release name.")
+	is.Equal(res.Namespace, "spaced")
+
+	rel, err := instAction.cfg.Releases.Get(res.Name, res.Version)
+	is.NoError(err)
+
+	is.Len(rel.Hooks, 1)
+	is.Equal(rel.Hooks[0].Manifest, manifestWithHook)
+	is.Equal(rel.Hooks[0].Events[0], release.HookPostInstall)
+	is.Equal(rel.Hooks[0].Events[1], release.HookPreDelete, "Expected event 0 is pre-delete")
+
+	is.NotEqual(len(res.Manifest), 0)
+	is.NotEqual(len(rel.Manifest), 0)
+	is.Contains(rel.Manifest, "---\n# Source: hello/templates/hello\nhello: world")
+	is.Equal(rel.Info.Description, "Install complete")
+
+	// Detecting previous bug where context termination after successful release
+	// caused release to fail.
+	done()
+	time.Sleep(time.Millisecond * 100)
+	lastRelease, err := instAction.cfg.Releases.Last(rel.Name)
+	is.NoError(err)
+	is.Equal(lastRelease.Info.Status, release.StatusDeployed)
+}
+
+func TestInstallRelease_WithBadPostRenderer(t *testing.T) {
+	is := assert.New(t)
+	instAction := installAction(t)
+
+	deleteAll := func(_ *bytes.Buffer) (*bytes.Buffer, error) {
+		return bytes.NewBuffer(nil), nil
+	}
+
+	instAction.PostRenderer = postrender.PostRendererFunc(deleteAll)
+	instAction.ReleaseName = "post-ender"
+
+	vals := map[string]interface{}{}
+	ctx, done := context.WithCancel(context.Background())
+	defer done()
+	_, err := instAction.RunWithContext(ctx, buildChart(), vals)
+	is.Error(err)
+}
+
+func TestInstallRelease_WithErroringPostRenderer(t *testing.T) {
+	is := assert.New(t)
+	instAction := installAction(t)
+
+	theError := fmt.Errorf("I'm an error")
+	justErrors := func(_ *bytes.Buffer) (*bytes.Buffer, error) {
+		return nil, theError
+	}
+
+	instAction.PostRenderer = postrender.PostRendererFunc(justErrors)
+	instAction.ReleaseName = "postrenderererr"
+
+	vals := map[string]interface{}{}
+	ctx, done := context.WithCancel(context.Background())
+	defer done()
+	_, err := instAction.RunWithContext(ctx, buildChart(), vals)
+	is.ErrorIs(err, theError)
 }
 
 func TestInstallRelease_Atomic(t *testing.T) {
